@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>尾牙餐點領取（掃描版）</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", Arial, sans-serif;
+    background: #f5f6f8;
+    margin: 0;
+    padding: 20px 16px 60px;
+    color: #222;
+  }
+  .card {
+    max-width: 420px;
+    margin: 0 auto;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    padding: 24px 20px;
+  }
+  h1 { font-size: 18px; margin: 0 0 16px; text-align: center; }
+  label { display: block; font-size: 13px; color: #666; margin: 12px 0 4px; }
+  input[type=text], input[type=password] {
+    width: 100%;
+    padding: 12px;
+    font-size: 16px;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+  }
+  button {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    font-weight: bold;
+    border: none;
+    border-radius: 8px;
+    margin-top: 12px;
+    cursor: pointer;
+  }
+  .btn-primary { background: #2d6cdf; color: #fff; }
+  .btn-primary:disabled { background: #9db8e8; }
+  .btn-confirm { background: #1f9d55; color: #fff; }
+  .btn-confirm:disabled { background: #9fd4b6; }
+  .btn-secondary { background: #eee; color: #333; }
+  .btn-danger { background: #eee; color: #b3261e; }
+  .msg { margin-top: 14px; font-size: 14px; padding: 10px 12px; border-radius: 8px; }
+  .msg-error { background: #fdecea; color: #b3261e; }
+  .msg-success { background: #e6f4ea; color: #1e7e34; }
+  .msg-info { background: #eef2ff; color: #33469b; }
+  .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; font-size: 15px; }
+  .info-row .k { color: #777; }
+  .info-row .v { font-weight: bold; text-align: right; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; margin-bottom: 10px; }
+  .badge-unpicked { background: #fff4e5; color: #a15c00; }
+  .badge-picked { background: #e6f4ea; color: #1e7e34; }
+  .who { text-align: center; font-size: 12px; color: #999; margin-top: 20px; }
+  .spinner { text-align: center; padding: 30px 0; color: #888; }
+  #scanWrap { position: relative; width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
+  #scanVideo { width: 100%; display: block; }
+  #scanFrame {
+    position: absolute; top: 12%; left: 12%; width: 76%; height: 76%;
+    border: 3px solid #4caf50; border-radius: 12px; box-shadow: 0 0 0 2000px rgba(0,0,0,0.35);
+    pointer-events: none;
+  }
+  .scan-hint { text-align: center; font-size: 13px; color: #888; margin-top: 10px; }
+  .divider { text-align: center; color: #bbb; font-size: 12px; margin: 16px 0 4px; }
+  .small-link { display: block; text-align: center; font-size: 12px; color: #999; margin-top: 16px; }
+</style>
+</head>
+<body>
+  <div class="card" id="app">
+    <div class="spinner">載入中...</div>
+  </div>
+
+<script>
+  // ============================================================
+  // 這支頁面要單獨部署在 Apps Script 以外的地方（例如 Netlify Drop），
+  // 這樣才是最上層網頁，iOS Safari 才會正常跳出相機權限詢問視窗。
+  // 它透過 JSONP 呼叫下面設定的 Apps Script 網址來查資料，
+  // 不需要瀏覽器對 Apps Script 有 CORS 授權，避開 fetch 常見的封鎖問題。
+  // ============================================================
+  var API_STORAGE_KEY = 'qr_api_base';
+  var STORAGE_KEY = 'qr_session_key';
+  var app = document.getElementById('app');
+  var videoStream = null;
+  var scanRAF = null;
+  var TOKEN = '';
+
+  // 從網址 ?id=xxx 帶入的 token（用手機內建相機掃到 Apps Script 連結時，
+  // 若改連到這支頁面，一樣可以直接帶入代碼）
+  (function readUrlToken() {
+    try {
+      var params = new URLSearchParams(window.location.search);
+      TOKEN = params.get('id') || '';
+    } catch (e) {}
+  })();
+
+  // 已經固定好 Apps Script 網址，福委打開網頁不用再手動貼一次。
+  // 如果之後 Apps Script 網址變了（例如重新部署成新的 URL），改這行就好。
+  var DEFAULT_API_BASE = 'https://script.google.com/macros/s/AKfycbxrNvtwU_STA8MXkMTrDw9F4AKDfKjNQXTXaOv1Z7wc4HopAjo5sxagik7E5tpAeelx/exec';
+
+  function getApiBase() {
+    try { return localStorage.getItem(API_STORAGE_KEY) || DEFAULT_API_BASE; } catch (e) { return DEFAULT_API_BASE; }
+  }
+  function setApiBase(url) {
+    try { localStorage.setItem(API_STORAGE_KEY, url); } catch (e) {}
+  }
+
+  function saveSession(sessionKey, name, role) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ sessionKey: sessionKey, name: name, role: role })); } catch (e) {}
+  }
+  function loadSession() {
+    try { var raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+  }
+  function clearSession() {
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  }
+  function stopScanner() {
+    if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
+    if (videoStream) {
+      videoStream.getTracks().forEach(function (t) { t.stop(); });
+      videoStream = null;
+    }
+  }
+
+  // ---- JSONP 呼叫 Apps Script ----
+  function apiCall(action, params, onDone) {
+    var base = getApiBase();
+    if (!base) {
+      onDone({ success: false, message: '尚未設定 Apps Script 網址' });
+      return;
+    }
+    var cbName = 'cb_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+    var done = false;
+    var timer = setTimeout(function () {
+      if (done) return;
+      done = true;
+      cleanup();
+      onDone({ success: false, message: '連線逾時，請確認網路連線與 Apps Script 網址是否正確' });
+    }, 15000);
+
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script && script.parentNode) script.parentNode.removeChild(script);
+    }
+
+    window[cbName] = function (data) {
+      if (done) return;
+      done = true;
+      cleanup();
+      onDone(data);
+    };
+
+    var qs = 'action=' + encodeURIComponent(action) + '&callback=' + cbName;
+    Object.keys(params || {}).forEach(function (k) {
+      if (params[k] === undefined || params[k] === null) return;
+      qs += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+    });
+    var sep = base.indexOf('?') >= 0 ? '&' : '?';
+    var script = document.createElement('script');
+    script.src = base + sep + qs;
+    script.onerror = function () {
+      if (done) return;
+      done = true;
+      cleanup();
+      onDone({ success: false, message: '無法連線到 Apps Script，請確認網址是否正確、是否已部署為「知道連結的任何人」' });
+    };
+    document.body.appendChild(script);
+  }
+
+  // ---- 首次使用：設定 Apps Script 網址 ----
+  function renderApiSetup(errorMsg) {
+    stopScanner();
+    app.innerHTML =
+      '<h1>掃描版設定</h1>' +
+      '<div class="msg msg-info">第一次使用請貼上 Apps Script 部署後的網址（結尾是 /exec），設定一次即可，之後不用再輸入。</div>' +
+      (errorMsg ? '<div class="msg msg-error">' + errorMsg + '</div>' : '') +
+      '<label>Apps Script 網址</label>' +
+      '<input type="text" id="apiBase" placeholder="https://script.google.com/macros/s/xxxx/exec" autocapitalize="off" autocorrect="off">' +
+      '<button class="btn-primary" id="saveApiBtn">儲存並繼續</button>';
+    document.getElementById('saveApiBtn').onclick = function () {
+      var val = document.getElementById('apiBase').value.trim();
+      if (!val) { renderApiSetup('請輸入網址'); return; }
+      setApiBase(val);
+      renderLogin();
+    };
+  }
+
+  function renderLogin(errorMsg) {
+    stopScanner();
+    app.innerHTML =
+      '<h1>尾牙餐點領取系統（掃描版）</h1>' +
+      (errorMsg ? '<div class="msg msg-error">' + errorMsg + '</div>' : '') +
+      '<label>帳號（身分證字號）</label>' +
+      '<input type="text" id="account" autocomplete="off" autocapitalize="characters">' +
+      '<label>密碼（生日 MMDD，例如 0524）</label>' +
+      '<input type="password" id="password" inputmode="numeric" maxlength="4">' +
+      '<button class="btn-primary" id="loginBtn">登入</button>' +
+      '<a href="javascript:void(0)" class="small-link" id="changeApiLink">變更 Apps Script 網址設定</a>';
+    document.getElementById('loginBtn').onclick = doLogin;
+    document.getElementById('changeApiLink').onclick = function () { renderApiSetup(); };
+  }
+
+  function doLogin() {
+    var account = document.getElementById('account').value.trim();
+    var password = document.getElementById('password').value.trim();
+    if (!account || !password) { renderLogin('請輸入帳號密碼'); return; }
+    var btn = document.getElementById('loginBtn');
+    btn.disabled = true;
+    btn.innerText = '登入中...';
+    apiCall('login', { account: account, password: password }, function (res) {
+      if (res.success) {
+        saveSession(res.sessionKey, res.name, res.role);
+        afterLogin(res.sessionKey, res.name, res.role);
+      } else {
+        renderLogin(res.message || '登入失敗');
+      }
+    });
+  }
+
+  // ---- 登入後首頁：掃描入口 ----
+  function afterLogin(sessionKey, name, role) {
+    stopScanner();
+    if (TOKEN) {
+      lookupAndRender(sessionKey, name, role);
+      return;
+    }
+    app.innerHTML =
+      '<h1>尾牙餐點領取系統</h1>' +
+      '<div class="msg msg-info">已登入：' + name + '（' + role + '）</div>' +
+      '<button class="btn-primary" id="scanBtn">開始掃描 QR Code</button>' +
+      '<div class="divider">或手動輸入代碼</div>' +
+      '<input type="text" id="manualToken" placeholder="輸入 QR 上的代碼" autocapitalize="characters">' +
+      '<button class="btn-secondary" id="manualBtn">查詢</button>' +
+      '<button class="btn-secondary" id="logoutBtn">登出</button>';
+
+    document.getElementById('scanBtn').onclick = function () { startScanner(sessionKey, name, role); };
+    document.getElementById('manualBtn').onclick = function () {
+      var t = document.getElementById('manualToken').value.trim();
+      if (t) { TOKEN = t; lookupAndRender(sessionKey, name, role); }
+    };
+    document.getElementById('logoutBtn').onclick = function () {
+      apiCall('logout', { sessionKey: sessionKey }, function () {});
+      clearSession();
+      renderLogin();
+    };
+  }
+
+  // ---- 相機掃描 ----
+  function startScanner(sessionKey, name, role) {
+    app.innerHTML =
+      '<h1>掃描 QR Code</h1>' +
+      '<div id="scanWrap">' +
+        '<video id="scanVideo" playsinline muted autoplay></video>' +
+        '<div id="scanFrame"></div>' +
+      '</div>' +
+      '<div class="scan-hint">請將 QR Code 對準框內</div>' +
+      '<button class="btn-secondary" id="cancelScanBtn">取消掃描</button>' +
+      '<div id="scanMsg"></div>';
+
+    document.getElementById('cancelScanBtn').onclick = function () {
+      stopScanner();
+      afterLogin(sessionKey, name, role);
+    };
+
+    var video = document.getElementById('scanVideo');
+    var canvas = document.createElement('canvas');
+    var ctx = canvas.getContext('2d');
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showScanError(sessionKey, name, role, '此瀏覽器不支援相機掃描，請改用手動輸入代碼，或用手機內建相機掃描 QR Code。');
+      return;
+    }
+    if (window.isSecureContext === false) {
+      showScanError(sessionKey, name, role, '這個網址不是 HTTPS，手機瀏覽器會擋掉相機權限，請確認網址開頭是 https://。');
+      return;
+    }
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      .then(function (stream) {
+        videoStream = stream;
+        video.srcObject = stream;
+        video.setAttribute('playsinline', true);
+        video.play();
+        scanRAF = requestAnimationFrame(function tick() { scanFrame(video, canvas, ctx, sessionKey, name, role); });
+      })
+      .catch(function (err) {
+        showScanError(sessionKey, name, role, '無法開啟相機（' + err.name + '），請改用手動輸入代碼，或用手機內建相機掃描 QR Code。');
+      });
+  }
+
+  function showScanError(sessionKey, name, role, msg) {
+    var msgBox = document.getElementById('scanMsg');
+    if (msgBox) {
+      msgBox.innerHTML = '<div class="msg msg-error">' + msg + '</div>' +
+        '<button class="btn-secondary" id="backToHomeBtn">返回</button>';
+      document.getElementById('backToHomeBtn').onclick = function () { afterLogin(sessionKey, name, role); };
+    }
+  }
+
+  function scanFrame(video, canvas, ctx, sessionKey, name, role) {
+    if (!videoStream) return;
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) {
+        var token = parseTokenFromScan(code.data);
+        if (token) {
+          stopScanner();
+          TOKEN = token;
+          lookupAndRender(sessionKey, name, role);
+          return;
+        }
+      }
+    }
+    scanRAF = requestAnimationFrame(function () { scanFrame(video, canvas, ctx, sessionKey, name, role); });
+  }
+
+  function parseTokenFromScan(text) {
+    try {
+      var u = new URL(text);
+      var id = u.searchParams.get('id');
+      if (id) return id;
+    } catch (e) {}
+    return text.trim();
+  }
+
+  // ---- 查詢並顯示餐點資訊 ----
+  function lookupAndRender(sessionKey, opName, opRole) {
+    app.innerHTML = '<div class="spinner">查詢中...</div>';
+    apiCall('lookup', { token: TOKEN, sessionKey: sessionKey }, function (res) {
+      if (res.needLogin) {
+        clearSession();
+        renderLogin('登入已過期，請重新登入');
+        return;
+      }
+      if (!res.success) {
+        app.innerHTML =
+          '<h1>尾牙餐點領取系統</h1>' +
+          '<div class="msg msg-error">' + res.message + '</div>' +
+          '<button class="btn-secondary" id="backBtn">返回</button>';
+        document.getElementById('backBtn').onclick = function () {
+          TOKEN = '';
+          afterLogin(sessionKey, opName, opRole);
+        };
+        return;
+      }
+      renderPerson(res, sessionKey, opRole);
+    });
+  }
+
+  function renderPerson(info, sessionKey, opRole) {
+    var picked = info.status === '已領';
+    var badge = picked
+      ? '<span class="badge badge-picked">已領取</span>'
+      : '<span class="badge badge-unpicked">尚未領取</span>';
+
+    var html = '<h1>尾牙餐點領取系統</h1>' + badge;
+    html += '<div class="info-row"><div class="k">姓名</div><div class="v">' + info.name + '</div></div>';
+    html += '<div class="info-row"><div class="k">部門</div><div class="v">' + info.dept + '</div></div>';
+    if (info.family) {
+      html += '<div class="info-row"><div class="k">員眷</div><div class="v">' + info.family + '</div></div>';
+    }
+    html += '<div class="info-row"><div class="k">餐點內容</div><div class="v">' + info.meal + '</div></div>';
+    html += '<div class="info-row"><div class="k">應領份數</div><div class="v">' + info.qty + '</div></div>';
+    html += '<div class="info-row"><div class="k">房號</div><div class="v">' + info.room + '</div></div>';
+
+    if (picked) {
+      html += '<div class="msg msg-success">已於 ' + info.pickedTime + ' 由 ' + info.pickedBy + ' 確認領取，無法重複領取。</div>';
+    } else if (info.canConfirm) {
+      html += '<button class="btn-confirm" id="confirmBtn">確認領取</button>';
+    } else {
+      html += '<div class="msg msg-info">您目前是唯讀權限，僅能查看餐點資訊，若要確認領取請通知車長操作。</div>';
+    }
+
+    html += '<button class="btn-secondary" id="scanNextBtn">掃描下一位</button>';
+    html += '<div class="who">操作人員：' + info.operatorName + '</div>';
+
+    app.innerHTML = html;
+
+    if (!picked && info.canConfirm) {
+      document.getElementById('confirmBtn').onclick = function () {
+        var btn = document.getElementById('confirmBtn');
+        btn.disabled = true;
+        btn.innerText = '處理中...';
+        apiCall('confirm', { token: TOKEN, sessionKey: sessionKey }, function (res) {
+          if (!res.success) {
+            app.insertAdjacentHTML('beforeend', '<div class="msg msg-error">' + res.message + '</div>');
+          }
+          lookupAndRender(sessionKey, info.operatorName, opRole);
+        });
+      };
+    }
+    document.getElementById('scanNextBtn').onclick = function () {
+      TOKEN = '';
+      afterLogin(sessionKey, info.operatorName, opRole);
+    };
+  }
+
+  // ---- 啟動流程 ----
+  (function start() {
+    if (!getApiBase()) {
+      renderApiSetup();
+      return;
+    }
+    var session = loadSession();
+    if (!session) {
+      renderLogin();
+      return;
+    }
+    apiCall('checksession', { sessionKey: session.sessionKey }, function (res) {
+      if (!res.valid) {
+        clearSession();
+        renderLogin();
+        return;
+      }
+      afterLogin(session.sessionKey, res.name, res.role);
+    });
+  })();
+</script>
+</body>
+</html>
