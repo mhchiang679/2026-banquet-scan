@@ -88,10 +88,10 @@
   var app = document.getElementById('app');
   var videoStream = null;
   var scanRAF = null;
-  var TOKEN = '';
+  var TOKEN = '';       // 目前正在查詢的 QR 代碼（可能是自己的，也可能是掃到別人的）
+  var OWN_TOKEN = '';   // 目前登入者自己那列的 Token，全程記住，回首頁都直接用它
 
-  // 從網址 ?id=xxx 帶入的 token（用手機內建相機掃到 Apps Script 連結時，
-  // 若改連到這支頁面，一樣可以直接帶入代碼）
+  // 從網址 ?id=xxx 帶入的 token（用手機內建相機掃到連結時，一樣可以直接帶入代碼）
   (function readUrlToken() {
     try {
       var params = new URLSearchParams(window.location.search);
@@ -99,7 +99,7 @@
     } catch (e) {}
   })();
 
-  // 已經固定好 Apps Script 網址，福委打開網頁不用再手動貼一次。
+  // 已經固定好 Apps Script 網址，不用再手動貼一次。
   // 如果之後 Apps Script 網址變了（例如重新部署成新的 URL），改這行就好。
   var DEFAULT_API_BASE = 'https://script.google.com/macros/s/AKfycbxrNvtwU_STA8MXkMTrDw9F4AKDfKjNQXTXaOv1Z7wc4HopAjo5sxagik7E5tpAeelx/exec';
 
@@ -110,8 +110,8 @@
     try { localStorage.setItem(API_STORAGE_KEY, url); } catch (e) {}
   }
 
-  function saveSession(sessionKey, name, role) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ sessionKey: sessionKey, name: name, role: role })); } catch (e) {}
+  function saveSession(sessionKey, name, role, ownToken) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ sessionKey: sessionKey, name: name, role: role, ownToken: ownToken || '' })); } catch (e) {}
   }
   function loadSession() {
     try { var raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
@@ -119,12 +119,22 @@
   function clearSession() {
     try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
   }
+  // 用跟伺服器產生 QR 一樣的服務／同一組網址規則，前端就能重建出同一張 QR 圖，不用另外呼叫 API
+  function ownQrImgUrl(token) {
+    var base = getApiBase();
+    var sep = base.indexOf('?') >= 0 ? '&' : '?';
+    var url = base + sep + 'id=' + encodeURIComponent(token);
+    return 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(url);
+  }
   function stopScanner() {
     if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = null; }
     if (videoStream) {
       videoStream.getTracks().forEach(function (t) { t.stop(); });
       videoStream = null;
     }
+  }
+  function isStaffRole(role) {
+    return !!(role && String(role).trim() !== '');
   }
 
   // ---- JSONP 呼叫 Apps Script ----
@@ -215,40 +225,74 @@
     btn.innerText = '登入中...';
     apiCall('login', { account: account, password: password }, function (res) {
       if (res.success) {
-        saveSession(res.sessionKey, res.name, res.role);
-        afterLogin(res.sessionKey, res.name, res.role);
+        OWN_TOKEN = res.ownToken || '';
+        saveSession(res.sessionKey, res.name, res.role, res.ownToken);
+        goHome(res.sessionKey, res.name, res.role);
       } else {
         renderLogin(res.message || '登入失敗');
       }
     });
   }
 
-  // ---- 登入後首頁：掃描入口 ----
-  function afterLogin(sessionKey, name, role) {
+  function doLogout(sessionKey) {
+    apiCall('logout', { sessionKey: sessionKey }, function () {});
+    clearSession();
+    OWN_TOKEN = '';
+    renderLogin();
+  }
+
+  // ---- 登入後回首頁 ----
+  // 不論身分，一律先看自己的資料＋領取用 QR；福委／區委／車長會在自己資料下方多出「掃描／手動輸入」入口，
+  // 用來查詢、確認別人的領取狀態（確認領取按鈕只有權限＝可確認領取的人，也就是車長，才會出現）。
+  function goHome(sessionKey, name, role) {
     stopScanner();
     if (TOKEN) {
-      lookupAndRender(sessionKey, name, role);
+      lookupAndRender(sessionKey, name, role, !!(OWN_TOKEN && TOKEN === OWN_TOKEN));
       return;
     }
-    app.innerHTML =
-      '<h1>尾牙餐點領取系統</h1>' +
-      '<div class="msg msg-info">已登入：' + name + '（' + role + '）</div>' +
+    if (OWN_TOKEN) {
+      TOKEN = OWN_TOKEN;
+      lookupAndRender(sessionKey, name, role, true);
+      return;
+    }
+    // 保底：理論上每個人都會有自己的 Token，若真的查不到...
+    if (!isStaffRole(role)) {
+      app.innerHTML =
+        '<h1>尾牙餐點領取系統</h1>' +
+        '<div class="msg msg-error">查無您的領取代碼，請聯繫福委協助確認。</div>' +
+        '<button class="btn-secondary" id="logoutBtn">登出</button>';
+      document.getElementById('logoutBtn').onclick = function () { doLogout(sessionKey); };
+      return;
+    }
+    renderScanEntry(sessionKey, name, role);
+  }
+
+  // ---- 福委／車長的「掃描／手動輸入」功能區塊 ----
+  function scanEntryHtml() {
+    return (
+      '<div class="divider">工作人員功能</div>' +
       '<button class="btn-primary" id="scanBtn">開始掃描 QR Code</button>' +
       '<div class="divider">或手動輸入代碼</div>' +
       '<input type="text" id="manualToken" placeholder="輸入 QR 上的代碼" autocapitalize="characters">' +
-      '<button class="btn-secondary" id="manualBtn">查詢</button>' +
-      '<button class="btn-secondary" id="logoutBtn">登出</button>';
-
+      '<button class="btn-secondary" id="manualBtn">查詢</button>'
+    );
+  }
+  function bindScanEntryHandlers(sessionKey, name, role) {
     document.getElementById('scanBtn').onclick = function () { startScanner(sessionKey, name, role); };
     document.getElementById('manualBtn').onclick = function () {
       var t = document.getElementById('manualToken').value.trim();
-      if (t) { TOKEN = t; lookupAndRender(sessionKey, name, role); }
+      if (t) { TOKEN = t; lookupAndRender(sessionKey, name, role, TOKEN === OWN_TOKEN); }
     };
-    document.getElementById('logoutBtn').onclick = function () {
-      apiCall('logout', { sessionKey: sessionKey }, function () {});
-      clearSession();
-      renderLogin();
-    };
+  }
+  // 只有在「查無自己 Token」的保底情況才會整頁只顯示掃描入口
+  function renderScanEntry(sessionKey, name, role) {
+    app.innerHTML =
+      '<h1>尾牙餐點領取系統</h1>' +
+      '<div class="msg msg-info">已登入：' + name + '（' + role + '）</div>' +
+      scanEntryHtml() +
+      '<button class="btn-secondary" id="logoutBtn">登出</button>';
+    bindScanEntryHandlers(sessionKey, name, role);
+    document.getElementById('logoutBtn').onclick = function () { doLogout(sessionKey); };
   }
 
   // ---- 相機掃描 ----
@@ -265,7 +309,8 @@
 
     document.getElementById('cancelScanBtn').onclick = function () {
       stopScanner();
-      afterLogin(sessionKey, name, role);
+      TOKEN = '';
+      goHome(sessionKey, name, role);
     };
 
     var video = document.getElementById('scanVideo');
@@ -299,7 +344,7 @@
     if (msgBox) {
       msgBox.innerHTML = '<div class="msg msg-error">' + msg + '</div>' +
         '<button class="btn-secondary" id="backToHomeBtn">返回</button>';
-      document.getElementById('backToHomeBtn').onclick = function () { afterLogin(sessionKey, name, role); };
+      document.getElementById('backToHomeBtn').onclick = function () { TOKEN = ''; goHome(sessionKey, name, role); };
     }
   }
 
@@ -316,7 +361,7 @@
         if (token) {
           stopScanner();
           TOKEN = token;
-          lookupAndRender(sessionKey, name, role);
+          lookupAndRender(sessionKey, name, role, TOKEN === OWN_TOKEN);
           return;
         }
       }
@@ -334,30 +379,38 @@
   }
 
   // ---- 查詢並顯示餐點資訊 ----
-  function lookupAndRender(sessionKey, opName, opRole) {
+  // isSelf：true＝正在看自己的資料（自己或福委／車長看自己那列都算）；顯示自己的QR，不給確認領取／掃描下一位。
+  function lookupAndRender(sessionKey, opName, opRole, isSelf) {
     app.innerHTML = '<div class="spinner">查詢中...</div>';
     apiCall('lookup', { token: TOKEN, sessionKey: sessionKey }, function (res) {
       if (res.needLogin) {
         clearSession();
+        OWN_TOKEN = '';
         renderLogin('登入已過期，請重新登入');
         return;
       }
       if (!res.success) {
+        var staff = isStaffRole(opRole);
         app.innerHTML =
           '<h1>尾牙餐點領取系統</h1>' +
           '<div class="msg msg-error">' + res.message + '</div>' +
-          '<button class="btn-secondary" id="backBtn">返回</button>';
-        document.getElementById('backBtn').onclick = function () {
-          TOKEN = '';
-          afterLogin(sessionKey, opName, opRole);
-        };
+          (staff ? '<button class="btn-secondary" id="backBtn">返回</button>' : '') +
+          '<button class="btn-secondary" id="logoutBtn">登出</button>';
+        if (staff) {
+          document.getElementById('backBtn').onclick = function () {
+            TOKEN = '';
+            goHome(sessionKey, opName, opRole);
+          };
+        }
+        document.getElementById('logoutBtn').onclick = function () { doLogout(sessionKey); };
         return;
       }
-      renderPerson(res, sessionKey, opRole);
+      renderPerson(res, sessionKey, opRole, isSelf);
     });
   }
 
-  function renderPerson(info, sessionKey, opRole) {
+  function renderPerson(info, sessionKey, opRole, isSelf) {
+    var staff = isStaffRole(opRole);
     var picked = info.status === '已領';
     var badge = picked
       ? '<span class="badge badge-picked">已領取</span>'
@@ -365,14 +418,40 @@
 
     var html = '<h1>尾牙餐點領取系統</h1>' + badge;
     html += '<div class="info-row"><div class="k">姓名</div><div class="v">' + info.name + '</div></div>';
-    html += '<div class="info-row"><div class="k">部門</div><div class="v">' + info.dept + '</div></div>';
+    if (!isSelf) {
+      html += '<div class="info-row"><div class="k">部門</div><div class="v">' + info.dept + '</div></div>';
+    }
     if (info.family) {
       html += '<div class="info-row"><div class="k">員眷</div><div class="v">' + info.family + '</div></div>';
     }
+    if (info.busStop) {
+      html += '<div class="info-row"><div class="k">遊覽車／上車地點</div><div class="v">' + info.busStop + '</div></div>';
+    }
+    if (info.lunchTable) {
+      html += '<div class="info-row"><div class="k">兩天午餐桌次</div><div class="v">' + info.lunchTable + '</div></div>';
+    }
+    html += '<div class="info-row"><div class="k">尾牙桌次</div><div class="v">' + info.dinnerTable + '</div></div>';
     html += '<div class="info-row"><div class="k">餐點內容</div><div class="v">' + info.meal + '</div></div>';
     html += '<div class="info-row"><div class="k">應領份數</div><div class="v">' + info.qty + '</div></div>';
     html += '<div class="info-row"><div class="k">房號</div><div class="v">' + info.room + '</div></div>';
 
+    if (isSelf) {
+      html += '<div style="text-align:center;margin:18px 0 6px;"><img src="' + ownQrImgUrl(TOKEN) + '" alt="領取用 QR Code" style="width:200px;height:200px;"></div>';
+      html += '<div class="scan-hint">現場請出示此 QR Code 給工作人員掃描領取</div>';
+      if (picked) {
+        html += '<div class="msg msg-success">已於 ' + info.pickedTime + ' 由 ' + info.pickedBy + ' 確認領取。</div>';
+      }
+      if (staff) {
+        html += scanEntryHtml();
+      }
+      html += '<button class="btn-secondary" id="logoutBtn">登出</button>';
+      app.innerHTML = html;
+      if (staff) { bindScanEntryHandlers(sessionKey, info.operatorName, opRole); }
+      document.getElementById('logoutBtn').onclick = function () { doLogout(sessionKey); };
+      return;
+    }
+
+    // 以下是福委／車長在查詢、確認別人領取狀態的畫面
     if (picked) {
       html += '<div class="msg msg-success">已於 ' + info.pickedTime + ' 由 ' + info.pickedBy + ' 確認領取，無法重複領取。</div>';
     } else if (info.canConfirm) {
@@ -382,6 +461,7 @@
     }
 
     html += '<button class="btn-secondary" id="scanNextBtn">掃描下一位</button>';
+    html += '<button class="btn-secondary" id="backHomeBtn">回我的頁面</button>';
     html += '<div class="who">操作人員：' + info.operatorName + '</div>';
 
     app.innerHTML = html;
@@ -395,13 +475,17 @@
           if (!res.success) {
             app.insertAdjacentHTML('beforeend', '<div class="msg msg-error">' + res.message + '</div>');
           }
-          lookupAndRender(sessionKey, info.operatorName, opRole);
+          lookupAndRender(sessionKey, info.operatorName, opRole, false);
         });
       };
     }
     document.getElementById('scanNextBtn').onclick = function () {
       TOKEN = '';
-      afterLogin(sessionKey, info.operatorName, opRole);
+      startScanner(sessionKey, info.operatorName, opRole);
+    };
+    document.getElementById('backHomeBtn').onclick = function () {
+      TOKEN = '';
+      goHome(sessionKey, info.operatorName, opRole);
     };
   }
 
@@ -422,7 +506,8 @@
         renderLogin();
         return;
       }
-      afterLogin(session.sessionKey, res.name, res.role);
+      OWN_TOKEN = res.ownToken || session.ownToken || '';
+      goHome(session.sessionKey, res.name, res.role);
     });
   })();
 </script>
