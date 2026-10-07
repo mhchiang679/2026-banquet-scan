@@ -57,6 +57,7 @@
   .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 12px; margin-bottom: 10px; }
   .badge-unpicked { background: #fff4e5; color: #a15c00; }
   .badge-picked { background: #e6f4ea; color: #1e7e34; }
+  .badge-type { background: #eef2ff; color: #33469b; }
   .who { text-align: center; font-size: 12px; color: #999; margin-top: 20px; }
   .spinner { text-align: center; padding: 30px 0; color: #888; }
   #scanWrap { position: relative; width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
@@ -135,6 +136,22 @@
   }
   function isStaffRole(role) {
     return !!(role && String(role).trim() !== '');
+  }
+  // 依「參加行程方式」判斷身分類型：
+  //  full   = 全程參與（遊覽車）            → 姓名、上車地點、兩天午餐桌次、尾牙桌次、餐點、份數、房號、領餐QR
+  //  stay   = 只參加尾牙加住宿（自行前往）  → 姓名、尾牙桌次、房號
+  //  dinner = 只參加尾牙（自行前往）        → 姓名、尾牙桌次
+  function attendeeType(method) {
+    var m = String(method || '');
+    if (m.indexOf('全程') >= 0) return 'full';
+    if (m.indexOf('住宿') >= 0) return 'stay';
+    if (m.indexOf('尾牙') >= 0) return 'dinner';
+    return 'full'; // 查不到行程方式時維持原本完整顯示，避免漏資料
+  }
+  function typeLabel(type) {
+    if (type === 'stay') return '只參加尾牙＋住宿';
+    if (type === 'dinner') return '只參加尾牙';
+    return '全程參與';
   }
 
   // ---- JSONP 呼叫 Apps Script ----
@@ -409,37 +426,50 @@
     });
   }
 
+  function infoRow(k, v) {
+    return '<div class="info-row"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
+  }
+
   function renderPerson(info, sessionKey, opRole, isSelf) {
     var staff = isStaffRole(opRole);
+    var type = attendeeType(info.method);
+    var needMeal = (type === 'full');   // 只有全程參與才有麥當勞餐點／領取
     var picked = info.status === '已領';
-    var badge = picked
-      ? '<span class="badge badge-picked">已領取</span>'
-      : '<span class="badge badge-unpicked">尚未領取</span>';
 
-    var html = '<h1>尾牙餐點領取系統</h1>' + badge;
-    html += '<div class="info-row"><div class="k">姓名</div><div class="v">' + info.name + '</div></div>';
-    if (!isSelf) {
-      html += '<div class="info-row"><div class="k">部門</div><div class="v">' + info.dept + '</div></div>';
+    var html = '<h1>尾牙餐點領取系統</h1>';
+    if (needMeal) {
+      html += picked
+        ? '<span class="badge badge-picked">已領取</span>'
+        : '<span class="badge badge-unpicked">尚未領取</span>';
+    } else {
+      html += '<span class="badge badge-type">' + typeLabel(type) + '</span>';
     }
-    if (info.family) {
-      html += '<div class="info-row"><div class="k">員眷</div><div class="v">' + info.family + '</div></div>';
+
+    // ---- 依身分類型決定要顯示哪些欄位 ----
+    html += infoRow('姓名', info.name);
+    if (!isSelf) { html += infoRow('部門', info.dept); }
+    if (type === 'full') {
+      if (info.family) { html += infoRow('員眷', info.family); }
+      if (info.busStop) { html += infoRow('遊覽車／上車地點', info.busStop); }
+      if (info.lunchTable) { html += infoRow('兩天午餐桌次', info.lunchTable); }
+      html += infoRow('尾牙桌次', info.dinnerTable);
+      html += infoRow('餐點內容', info.meal);
+      html += infoRow('應領份數', info.qty);
+      html += infoRow('房號', info.room);
+    } else if (type === 'stay') {
+      html += infoRow('尾牙桌次', info.dinnerTable);
+      html += infoRow('房號', info.room);
+    } else {
+      html += infoRow('尾牙桌次', info.dinnerTable);
     }
-    if (info.busStop) {
-      html += '<div class="info-row"><div class="k">遊覽車／上車地點</div><div class="v">' + info.busStop + '</div></div>';
-    }
-    if (info.lunchTable) {
-      html += '<div class="info-row"><div class="k">兩天午餐桌次</div><div class="v">' + info.lunchTable + '</div></div>';
-    }
-    html += '<div class="info-row"><div class="k">尾牙桌次</div><div class="v">' + info.dinnerTable + '</div></div>';
-    html += '<div class="info-row"><div class="k">餐點內容</div><div class="v">' + info.meal + '</div></div>';
-    html += '<div class="info-row"><div class="k">應領份數</div><div class="v">' + info.qty + '</div></div>';
-    html += '<div class="info-row"><div class="k">房號</div><div class="v">' + info.room + '</div></div>';
 
     if (isSelf) {
-      html += '<div style="text-align:center;margin:18px 0 6px;"><img src="' + ownQrImgUrl(TOKEN) + '" alt="領取用 QR Code" style="width:200px;height:200px;"></div>';
-      html += '<div class="scan-hint">現場請出示此 QR Code 給工作人員掃描領取</div>';
-      if (picked) {
-        html += '<div class="msg msg-success">已於 ' + info.pickedTime + ' 由 ' + info.pickedBy + ' 確認領取。</div>';
+      if (needMeal) {
+        html += '<div style="text-align:center;margin:18px 0 6px;"><img src="' + ownQrImgUrl(TOKEN) + '" alt="領餐條碼 QR Code" style="width:200px;height:200px;"></div>';
+        html += '<div class="scan-hint">現場請出示此 QR Code 給工作人員掃描領取</div>';
+        if (picked) {
+          html += '<div class="msg msg-success">已於 ' + info.pickedTime + ' 由 ' + info.pickedBy + ' 確認領取。</div>';
+        }
       }
       if (staff) {
         html += scanEntryHtml();
@@ -452,7 +482,9 @@
     }
 
     // 以下是福委／車長在查詢、確認別人領取狀態的畫面
-    if (picked) {
+    if (!needMeal) {
+      html += '<div class="msg msg-info">此人' + typeLabel(type) + '，沒有餐點需要領取。</div>';
+    } else if (picked) {
       html += '<div class="msg msg-success">已於 ' + info.pickedTime + ' 由 ' + info.pickedBy + ' 確認領取，無法重複領取。</div>';
     } else if (info.canConfirm) {
       html += '<button class="btn-confirm" id="confirmBtn">確認領取</button>';
@@ -466,7 +498,7 @@
 
     app.innerHTML = html;
 
-    if (!picked && info.canConfirm) {
+    if (needMeal && !picked && info.canConfirm) {
       document.getElementById('confirmBtn').onclick = function () {
         var btn = document.getElementById('confirmBtn');
         btn.disabled = true;
