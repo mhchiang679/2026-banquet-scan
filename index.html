@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>尾牙同仁查詢系統</title>
+<title>尾牙同仁資訊查詢系統</title>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <style>
   * { box-sizing: border-box; }
@@ -221,7 +221,7 @@
   function renderLogin(errorMsg) {
     stopScanner();
     app.innerHTML =
-      '<h1>尾牙餐點領取系統（掃描版）</h1>' +
+      '<h1>尾牙同仁資訊查詢系統</h1>' +
       (errorMsg ? '<div class="msg msg-error">' + errorMsg + '</div>' : '') +
       '<label>帳號（身分證字號）</label>' +
       '<input type="text" id="account" autocomplete="off" autocapitalize="characters">' +
@@ -275,7 +275,7 @@
     // 保底：理論上每個人都會有自己的 Token，若真的查不到...
     if (!isStaffRole(role)) {
       app.innerHTML =
-        '<h1>尾牙餐點領取系統</h1>' +
+        '<h1>尾牙同仁資訊查詢系統</h1>' +
         '<div class="msg msg-error">查無您的領取代碼，請聯繫福委協助確認。</div>' +
         '<button class="btn-secondary" id="logoutBtn">登出</button>';
       document.getElementById('logoutBtn').onclick = function () { doLogout(sessionKey); };
@@ -304,7 +304,7 @@
   // 只有在「查無自己 Token」的保底情況才會整頁只顯示掃描入口
   function renderScanEntry(sessionKey, name, role) {
     app.innerHTML =
-      '<h1>尾牙餐點領取系統</h1>' +
+      '<h1>尾牙同仁資訊查詢系統</h1>' +
       '<div class="msg msg-info">已登入：' + name + '（' + role + '）</div>' +
       scanEntryHtml() +
       '<button class="btn-secondary" id="logoutBtn">登出</button>';
@@ -409,7 +409,7 @@
       if (!res.success) {
         var staff = isStaffRole(opRole);
         app.innerHTML =
-          '<h1>尾牙餐點領取系統</h1>' +
+          '<h1>尾牙同仁資訊查詢系統</h1>' +
           '<div class="msg msg-error">' + res.message + '</div>' +
           (staff ? '<button class="btn-secondary" id="backBtn">返回</button>' : '') +
           '<button class="btn-secondary" id="logoutBtn">登出</button>';
@@ -436,7 +436,7 @@
     var needMeal = (type === 'full');   // 只有全程參與才有麥當勞餐點／領取
     var picked = info.status === '已領';
 
-    var html = '<h1>尾牙餐點領取系統</h1>';
+    var html = '<h1>尾牙同仁資訊查詢系統</h1>';
     if (needMeal) {
       html += picked
         ? '<span class="badge badge-picked">已領取</span>'
