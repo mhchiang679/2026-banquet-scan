@@ -433,7 +433,8 @@
   function renderPerson(info, sessionKey, opRole, isSelf) {
     var staff = isStaffRole(opRole);
     var type = attendeeType(info.method);
-    var needMeal = (type === 'full');   // 只有全程參與才有麥當勞餐點／領取
+    var hasRealToken = String(TOKEN || '').indexOf('ID_') !== 0;   // ID_ 開頭＝試算表沒有 Token 的人（員眷、只參加尾牙／住宿等）
+    var needMeal = (type === 'full' && hasRealToken);   // 只有全程參與且有 Token 才有餐點／領取
     var picked = info.status === '已領';
 
     var html = '<h1>尾牙同仁資訊查詢系統</h1>';
@@ -453,8 +454,10 @@
       if (info.busStop) { html += infoRow('遊覽車／上車地點', info.busStop); }
       if (info.lunchTable) { html += infoRow('兩天午餐桌次', info.lunchTable); }
       html += infoRow('尾牙桌次', info.dinnerTable);
-      html += infoRow('餐點內容', info.meal);
-      html += infoRow('應領份數', info.qty);
+      if (hasRealToken) {
+        html += infoRow('餐點內容', info.meal);
+        html += infoRow('應領份數', info.qty);
+      }
       html += infoRow('房號', info.room);
     } else if (type === 'stay') {
       html += infoRow('尾牙桌次', info.dinnerTable);
